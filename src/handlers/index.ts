@@ -48,7 +48,6 @@ export async function handleStart(ctx: Context, userData: UserData) {
       reply_markup: createLanguageKeyboard(),
     }
   );
-  userData.messagesToDelete.push(languageMessage.message_id);
   userData.keyboard_active = true;
 }
 
@@ -65,6 +64,18 @@ export async function handleLanguageSelection(
   userData.language = languageId;
   userData.manager = languageOption.manager;
   userData.keyboard_active = false;
+
+  // Delete the language selection message
+  if (ctx.callbackQuery?.message?.message_id) {
+    try {
+      await ctx.api.deleteMessage(
+        ctx.chat!.id,
+        ctx.callbackQuery.message.message_id
+      );
+    } catch (error) {
+      console.warn("Failed to delete language selection message:", error);
+    }
+  }
 
   const message = await ctx.reply(getTranslation(languageId, "carRequest"), {
     reply_markup: { remove_keyboard: true },
