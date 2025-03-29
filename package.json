@@ -5,16 +5,17 @@
   "main": "dist/bot.js",
   "scripts": {
     "build": "tsc",
-    "start": "node --no-deprecation -r ts-node/register src/bot.ts",
-    "dev": "ts-node src/bot.ts"
+    "start": "node dist/bot.js",
+    "dev": "ts-node src/bot.ts",
+    "postinstall": "npm run build"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
-    "grammy": "^1.21.1"
+    "grammy": "^1.21.1",
+    "ts-node": "^10.9.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.19",
-    "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   }
 }

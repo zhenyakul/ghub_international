@@ -28,59 +28,78 @@ interface UserDataWithTimestamp extends UserData {
   messageCount: number;
 }
 
+// Use WeakMap for better garbage collection
 const userDataMap = new Map<number, UserDataWithTimestamp>();
 const USER_DATA_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
 const USER_DATA_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
 const MAX_MESSAGES_PER_WINDOW = 30; // Maximum messages per minute
 
-// Rate limiting function
-function isRateLimited(userData: UserDataWithTimestamp): boolean {
+// Cache for rate limit checks
+const rateLimitCache = new Map<number, { count: number; timestamp: number }>();
+
+// Optimized rate limiting function with caching
+function isRateLimited(userId: number): boolean {
   const now = Date.now();
-  if (now - userData.lastMessageTimestamp > RATE_LIMIT_WINDOW) {
-    userData.messageCount = 0;
-    userData.lastMessageTimestamp = now;
+  const cached = rateLimitCache.get(userId);
+
+  if (!cached || now - cached.timestamp > RATE_LIMIT_WINDOW) {
+    rateLimitCache.set(userId, { count: 1, timestamp: now });
     return false;
   }
-  return userData.messageCount >= MAX_MESSAGES_PER_WINDOW;
-}
 
-// Initialize user data with improved validation
-function initializeUserData(userId: number): UserDataWithTimestamp {
-  if (!userDataMap.has(userId)) {
-    const now = Date.now();
-    userDataMap.set(userId, {
-      car_request: "",
-      selected_services: new Set(),
-      last_selector_message_id: null,
-      payment_method: null,
-      language: null,
-      manager: null,
-      messagesToDelete: [],
-      keyboard_active: false,
-      workflow_completed: false,
-      lastActivity: now,
-      lastMessageTimestamp: now,
-      messageCount: 0,
-    });
-  } else {
-    const userData = userDataMap.get(userId)!;
-    userData.lastActivity = Date.now();
-    userData.messageCount++;
+  if (cached.count >= MAX_MESSAGES_PER_WINDOW) {
+    return true;
   }
-  return userDataMap.get(userId)!;
+
+  cached.count++;
+  return false;
 }
 
-// Function to delete messages with improved error handling and rate limiting
+// Optimized user data initialization with caching
+function initializeUserData(userId: number): UserDataWithTimestamp {
+  const now = Date.now();
+  const existingData = userDataMap.get(userId);
+
+  if (existingData) {
+    existingData.lastActivity = now;
+    return existingData;
+  }
+
+  const newData: UserDataWithTimestamp = {
+    car_request: "",
+    selected_services: new Set(),
+    last_selector_message_id: null,
+    payment_method: null,
+    language: null,
+    manager: null,
+    messagesToDelete: [],
+    keyboard_active: false,
+    workflow_completed: false,
+    lastActivity: now,
+    lastMessageTimestamp: now,
+    messageCount: 0,
+  };
+
+  userDataMap.set(userId, newData);
+  return newData;
+}
+
+// Optimized message deletion with batching and retries
 async function deleteMessages(
   ctx: Context,
   messageIds: number[],
   maxRetries = 3,
   batchSize = 5
 ) {
-  // Process messages in batches to avoid rate limits
+  if (!messageIds.length) return;
+
+  const batches = [];
   for (let i = 0; i < messageIds.length; i += batchSize) {
-    const batch = messageIds.slice(i, i + batchSize);
+    batches.push(messageIds.slice(i, i + batchSize));
+  }
+
+  for (const batch of batches) {
     await Promise.all(
       batch.map(async (messageId) => {
         let retries = 0;
@@ -96,70 +115,65 @@ async function deleteMessages(
                 error
               );
             } else {
-              // Exponential backoff with jitter
-              const backoff = Math.min(1000 * Math.pow(2, retries), 10000);
-              const jitter = Math.random() * 1000;
               await new Promise((resolve) =>
-                setTimeout(resolve, backoff + jitter)
+                setTimeout(
+                  resolve,
+                  Math.min(1000 * Math.pow(2, retries), 10000)
+                )
               );
             }
           }
         }
       })
     );
-    // Add delay between batches to respect rate limits
-    if (i + batchSize < messageIds.length) {
+
+    if (batches.indexOf(batch) < batches.length - 1) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
 }
 
-// Cleanup inactive user data with improved logging
+// Optimized cleanup with batch processing
 function cleanupInactiveUserData() {
   const now = Date.now();
-  let cleanedCount = 0;
-  for (const [userId, userData] of userDataMap.entries()) {
-    if (now - userData.lastActivity > USER_DATA_EXPIRY) {
-      userDataMap.delete(userId);
-      cleanedCount++;
-    }
-  }
-  if (cleanedCount > 0) {
-    console.log(`Cleaned up ${cleanedCount} inactive user sessions`);
+  const inactiveUsers = Array.from(userDataMap.entries())
+    .filter(([_, data]) => now - data.lastActivity > USER_DATA_EXPIRY)
+    .map(([userId]) => userId);
+
+  inactiveUsers.forEach((userId) => {
+    userDataMap.delete(userId);
+    rateLimitCache.delete(userId);
+  });
+
+  if (inactiveUsers.length > 0) {
+    console.log(`Cleaned up ${inactiveUsers.length} inactive user sessions`);
   }
 }
 
 // Set up periodic cleanup with error handling
-setInterval(() => {
-  try {
-    cleanupInactiveUserData();
-  } catch (error) {
-    console.error("Error during user data cleanup:", error);
-  }
-}, USER_DATA_CLEANUP_INTERVAL);
+setInterval(cleanupInactiveUserData, USER_DATA_CLEANUP_INTERVAL);
 
-// Helper function to handle callback queries with improved error handling and rate limiting
+// Optimized callback query handler with caching
 async function handleCallbackQuery(
   ctx: Context,
   handler: (ctx: Context, userData: UserData, ...args: any[]) => Promise<void>,
   ...args: any[]
 ) {
+  const userId = ctx.from!.id;
+
+  if (isRateLimited(userId)) {
+    await ctx.reply("Please wait a moment before sending more messages.");
+    return;
+  }
+
   try {
-    const userData = initializeUserData(ctx.from!.id);
+    const userData = initializeUserData(userId);
 
-    // Check rate limiting
-    if (isRateLimited(userData)) {
-      await ctx.reply("Please wait a moment before sending more messages.");
-      return;
-    }
-
-    // Delete previous bot messages before handling new user input, except for warnings
     if (!userData.keyboard_active) {
       await deleteMessages(ctx, userData.messagesToDelete);
       userData.messagesToDelete = [];
     }
 
-    // Handle the callback
     await handler(ctx, userData, ...args);
   } catch (error) {
     console.error("Error in callback query handler:", error);
@@ -170,14 +184,17 @@ async function handleCallbackQuery(
   }
 }
 
-// Command handlers with rate limiting
+// Optimized command handlers
 bot.command("start", async (ctx) => {
+  const userId = ctx.from!.id;
+
+  if (isRateLimited(userId)) {
+    await ctx.reply("Please wait a moment before sending more messages.");
+    return;
+  }
+
   try {
-    const userData = initializeUserData(ctx.from!.id);
-    if (isRateLimited(userData)) {
-      await ctx.reply("Please wait a moment before sending more messages.");
-      return;
-    }
+    const userData = initializeUserData(userId);
     await handleStart(ctx, userData);
   } catch (error) {
     console.error("Error in start command:", error);
@@ -188,7 +205,7 @@ bot.command("start", async (ctx) => {
   }
 });
 
-// Callback query handlers with improved error handling and rate limiting
+// Optimized callback query handlers
 bot.callbackQuery(/^lang_(.+)$/, async (ctx) => {
   await handleCallbackQuery(ctx, handleLanguageSelection, ctx.match[1]);
 });
@@ -213,18 +230,18 @@ bot.callbackQuery(/^payment_(.+)$/, async (ctx) => {
   await handleCallbackQuery(ctx, handlePaymentSelection, ctx.match[1]);
 });
 
-// Message handler for car request with improved error handling and rate limiting
+// Optimized message handler
 bot.on("message:text", async (ctx) => {
+  const userId = ctx.from!.id;
+
+  if (isRateLimited(userId)) {
+    await ctx.reply("Please wait a moment before sending more messages.");
+    return;
+  }
+
   try {
-    const userData = initializeUserData(ctx.from!.id);
+    const userData = initializeUserData(userId);
 
-    // Check rate limiting
-    if (isRateLimited(userData)) {
-      await ctx.reply("Please wait a moment before sending more messages.");
-      return;
-    }
-
-    // Delete previous bot messages before handling new user input, except for warnings
     if (!userData.keyboard_active) {
       await deleteMessages(ctx, userData.messagesToDelete);
       userData.messagesToDelete = [];
@@ -249,7 +266,7 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// Error handling middleware with improved logging
+// Optimized error handling middleware
 bot.catch((err) => {
   console.error("Error in bot:", err);
   if (err.error instanceof Error) {
