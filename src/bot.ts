@@ -12,8 +12,22 @@ import {
   handleTextMessage,
 } from "./handlers";
 import * as dotenv from "dotenv";
+import express, { Request, Response } from "express";
 
 dotenv.config();
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// Basic health check endpoint
+app.get("/", (req: Request, res: Response) => {
+  res.send("Bot is running!");
+});
+
+// Start the Express server
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+});
 
 const bot = new Bot(process.env.BOT_TOKEN || "");
 
